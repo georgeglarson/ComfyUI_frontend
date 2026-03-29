@@ -1,0 +1,459 @@
+<script setup lang="ts">
+import axios from 'axios'
+import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+import { isComboInputSpec } from '@/schemas/nodeDef/nodeDefSchemaV2'
+import type {
+  RemoteComboConfig,
+  RemoteItemSchema
+} from '@/schemas/nodeDefSchema'
+import { useAuthStore } from '@/stores/authStore'
+import type { SimplifiedWidget } from '@/types/simplifiedWidget'
+import { cn } from '@/utils/tailwindUtil'
+
+import FormDropdown from './form/dropdown/FormDropdown.vue'
+import type { FormDropdownItem, LayoutMode } from './form/dropdown/types'
+import { AssetKindKey } from './form/dropdown/types'
+import {
+  buildSearchText,
+  extractItems,
+  getByPath,
+  mapToDropdownItem
+} from '../utils/itemSchemaUtils'
+import { fetchRemoteRoute } from '../utils/fetchRemoteRoute'
+
+const DEFAULT_MAX_RETRIES = 5
+const DEFAULT_TIMEOUT = 30000
+
+// --- Persistent cache using browser Cache API (survives page reloads) ---
+const CACHE_NAME = 'comfy-remote-widget'
+
+function buildCacheKey(config: RemoteComboConfig): string {
+  const params = new URLSearchParams({
+    route: config.route,
+    useComfyApi: config.use_comfy_api ? '1' : '0',
+    responseKey: config.response_key ?? '',
+    pageSize: String(config.page_size ?? 0)
+  })
+  if (config.use_comfy_api) {
+    params.set('u', useAuthStore().userId ?? 'anon')
+  }
+  return `https://cache.comfy.invalid/?${params}`
+}
+
+async function getCached(config: RemoteComboConfig): Promise<unknown[] | null> {
+  try {
+    const cache = await caches.open(CACHE_NAME)
+    const resp = await cache.match(buildCacheKey(config))
+    if (!resp) return null
+    const entry = await resp.json()
+    const ttl = config.refresh
+    if (!ttl || ttl <= 0) return entry.data
+    if (Date.now() - entry.timestamp < ttl) return entry.data
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function clearCache(config: RemoteComboConfig) {
+  try {
+    const cache = await caches.open(CACHE_NAME)
+    await cache.delete(buildCacheKey(config))
+  } catch {
+    // ignore
+  }
+}
+
+async function setCache(config: RemoteComboConfig, data: unknown[]) {
+  try {
+    const cache = await caches.open(CACHE_NAME)
+    const body = JSON.stringify({ data, timestamp: Date.now() })
+    await cache.put(buildCacheKey(config), new Response(body))
+  } catch {
+    // Cache API unavailable — widget still works, just no persistence
+  }
+}
+
+const { widget } = defineProps<{
+  widget: SimplifiedWidget<string | undefined>
+}>()
+
+const modelValue = defineModel<string>()
+
+const { t } = useI18n()
+
+const comboSpec = computed(() => {
+  if (widget.spec && isComboInputSpec(widget.spec)) {
+    return widget.spec
+  }
+  return undefined
+})
+const remoteConfig = computed<RemoteComboConfig | undefined>(
+  () => comboSpec.value?.remote_combo
+)
+const itemSchema = computed<RemoteItemSchema | undefined>(
+  () => remoteConfig.value?.item_schema
+)
+
+// --- Fetch state ---
+const rawItems = ref<unknown[]>([])
+const loading = ref(false)
+const loadingMore = ref(false)
+const error = ref<string | null>(null)
+let abortController: AbortController | undefined
+
+function getBackoff(count: number): number {
+  return Math.min(1000 * Math.pow(2, count), 16000)
+}
+
+// Distinguish transient errors (worth retrying) from permanent ones.
+// 401/403/404 etc. won't fix themselves — retrying wastes time.
+function isRetriableError(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return true
+  const status = err.response?.status
+  if (status == null) return true
+  if (status >= 500) return true
+  return status === 408 || status === 429
+}
+
+// --- Auto-select policy ---
+// Only sets modelValue when it's empty; never overrides an existing value
+// (valid or stale) — user intent and workflow portability are preserved.
+// 'first' may fire as soon as items exist (per-page in paginated mode);
+// 'last' fires only after terminal success, since the actual last item
+// isn't known until all pages have loaded.
+function applyAutoSelect(config: RemoteComboConfig) {
+  if (modelValue.value) return
+
+  const list = items.value
+  if (list.length === 0) return
+
+  if (config.auto_select === 'first') {
+    modelValue.value = list[0].id
+  } else if (config.auto_select === 'last') {
+    modelValue.value = list[list.length - 1].id
+  }
+}
+
+// --- Single-page fetch (non-paginated mode) ---
+async function fetchAll(config: RemoteComboConfig) {
+  const controller = abortController!
+  const maxRetries = config.max_retries ?? DEFAULT_MAX_RETRIES
+  loading.value = true
+  error.value = null
+
+  let attempts = 0
+  while (!controller.signal.aborted) {
+    try {
+      const res = await fetchRemoteRoute(config.route, {
+        timeout: config.timeout ?? DEFAULT_TIMEOUT,
+        signal: controller.signal,
+        useComfyApi: config.use_comfy_api
+      })
+      if (controller.signal.aborted) return
+      const fetchedItems = extractItems(res.data, config.response_key)
+      if (fetchedItems === null) {
+        console.error('RichComboWidget: expected array response', {
+          route: config.route,
+          responseKey: config.response_key,
+          received: res.data
+        })
+        error.value = t('widgets.remoteCombo.loadFailed')
+        break
+      }
+      await setCache(config, fetchedItems)
+      if (controller.signal.aborted) return
+      rawItems.value = fetchedItems
+      applyAutoSelect(config)
+      break
+    } catch (err: unknown) {
+      if (controller.signal.aborted) return
+      console.error('RichComboWidget: fetch error', err)
+      if (!isRetriableError(err)) {
+        error.value = t('widgets.remoteCombo.loadFailed')
+        break
+      }
+      attempts++
+      if (attempts >= maxRetries) {
+        error.value = t('widgets.remoteCombo.loadFailed')
+        break
+      }
+      const delay = getBackoff(attempts)
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+
+  if (!controller.signal.aborted) {
+    loading.value = false
+  }
+}
+
+// --- Progressive fetch (paginated mode) ---
+async function fetchPaginated(config: RemoteComboConfig) {
+  const controller = abortController!
+  const pageSize = config.page_size!
+  const maxRetries = config.max_retries ?? DEFAULT_MAX_RETRIES
+  let page = 0
+  let consecutiveErrors = 0
+  let terminalSuccess = false
+
+  // First page shows loading indicator
+  loading.value = true
+  error.value = null
+
+  while (!controller.signal.aborted) {
+    try {
+      const params = {
+        page: String(page),
+        page_size: String(pageSize)
+      }
+      const res = await fetchRemoteRoute(config.route, {
+        params,
+        timeout: config.timeout ?? DEFAULT_TIMEOUT,
+        signal: controller.signal,
+        useComfyApi: config.use_comfy_api
+      })
+
+      if (controller.signal.aborted) return
+
+      if (
+        !res.data ||
+        typeof res.data !== 'object' ||
+        Array.isArray(res.data)
+      ) {
+        console.error(
+          'RichComboWidget: expected { items, has_more } response',
+          { route: config.route, page, received: res.data }
+        )
+        break
+      }
+
+      const pageItems: unknown[] = Array.isArray(res.data.items)
+        ? res.data.items
+        : []
+      const hasMore: boolean = res.data.has_more === true
+
+      rawItems.value = [...rawItems.value, ...pageItems]
+      consecutiveErrors = 0
+
+      // After first page, switch from "loading" to "loading more"
+      if (page === 0) {
+        loading.value = false
+        loadingMore.value = true
+      }
+
+      // 'first' is known as soon as we have any items; idempotent thereafter.
+      if (config.auto_select === 'first') applyAutoSelect(config)
+
+      if (!hasMore || pageItems.length === 0) {
+        terminalSuccess = true
+        break
+      }
+      page++
+    } catch (err: unknown) {
+      if (controller.signal.aborted) return
+
+      if (!isRetriableError(err)) {
+        console.error(
+          `RichComboWidget: non-retriable error on page ${page}`,
+          err
+        )
+        break
+      }
+      consecutiveErrors++
+      if (consecutiveErrors >= maxRetries) {
+        console.error(
+          `RichComboWidget: giving up after ${maxRetries} consecutive errors on page ${page}`,
+          err
+        )
+        break
+      }
+      // Retry same page after backoff
+      const delay = getBackoff(consecutiveErrors)
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+
+  if (controller.signal.aborted) return
+
+  // Cache the accumulated result before releasing loading state; an abort
+  // during setCache then skips the state reset instead of flickering it.
+  // Only cache on terminal success — caching partial results would poison the
+  // next mount with an incomplete list and never re-fetch the missing pages.
+  if (terminalSuccess && rawItems.value.length > 0) {
+    await setCache(config, rawItems.value)
+  }
+
+  if (controller.signal.aborted) return
+
+  loading.value = false
+  loadingMore.value = false
+
+  if (!terminalSuccess && rawItems.value.length === 0) {
+    error.value = t('widgets.remoteCombo.loadFailed')
+  }
+
+  if (terminalSuccess) {
+    applyAutoSelect(config)
+  }
+}
+
+async function fetchItems(bypassCache = false) {
+  const config = remoteConfig.value
+  if (!config) return
+
+  // Claim the active controller before any async work so the cache-hit
+  // path can bail out if a later fetchItems supersedes us.
+  abortController?.abort()
+  const myController = new AbortController()
+  abortController = myController
+
+  // Check cache first (unless manual refresh)
+  if (!bypassCache) {
+    const cached = await getCached(config)
+    if (myController.signal.aborted) return
+    if (cached) {
+      rawItems.value = cached
+      applyAutoSelect(config)
+      return
+    }
+  }
+
+  // Reset items for fresh fetch
+  rawItems.value = []
+
+  if (config.page_size) {
+    await fetchPaginated(config)
+  } else {
+    await fetchAll(config)
+  }
+}
+
+onMounted(() => {
+  void fetchItems()
+})
+
+onUnmounted(() => {
+  abortController?.abort()
+})
+
+// --- Preview type ---
+const assetKind = computed(() => itemSchema.value?.preview_type ?? 'image')
+
+provide(AssetKindKey, assetKind)
+
+// --- Item mapping ---
+const items = computed<FormDropdownItem[]>(() => {
+  const schema = itemSchema.value
+  if (schema) {
+    return rawItems.value.map((raw) => mapToDropdownItem(raw, schema))
+  }
+  return rawItems.value.map((raw) => {
+    const val = String(raw ?? '')
+    return { id: val, name: val }
+  })
+})
+
+// --- Search ---
+const searchIndex = computed(() => {
+  const schema = itemSchema.value
+  const fields = schema?.search_fields
+  if (!schema || !fields?.length) return new Map<string, string>()
+  const index = new Map<string, string>()
+  for (const raw of rawItems.value) {
+    const id = String(getByPath(raw, schema.value_field) ?? '')
+    const text = buildSearchText(raw, fields)
+    if (text) index.set(id, text)
+  }
+  return index
+})
+
+const layoutMode = ref<LayoutMode>('list')
+const selectedSet = ref<Set<string>>(new Set())
+
+async function searcher(query: string, searchItems: FormDropdownItem[]) {
+  if (!query.trim()) return searchItems
+  const q = query.toLowerCase()
+  return searchItems.filter((item) => {
+    const text = searchIndex.value.get(item.id) ?? item.name.toLowerCase()
+    return text.includes(q)
+  })
+}
+
+// --- Selection sync ---
+watch(
+  [modelValue, items],
+  ([val]) => {
+    selectedSet.value.clear()
+    if (val) {
+      const item = items.value.find((i) => i.id === val)
+      if (item) selectedSet.value.add(item.id)
+    }
+  },
+  { immediate: true }
+)
+
+function handleRefresh() {
+  abortController?.abort()
+  error.value = null
+  const config = remoteConfig.value
+  if (config) void clearCache(config)
+  void fetchItems(true)
+}
+
+function handleSelection(selected: Set<string>) {
+  modelValue.value = selected.values().next().value
+}
+
+const placeholder = computed(() => {
+  if (loading.value) return t('widgets.remoteCombo.loading')
+  if (error.value) return error.value
+  if (loadingMore.value) {
+    return t('widgets.remoteCombo.itemsLoaded', {
+      count: items.value.length
+    })
+  }
+  return t('widgets.uploadSelect.placeholder')
+})
+</script>
+
+<template>
+  <div
+    class="flex w-full min-w-0 items-center gap-1 rounded-lg focus-within:ring focus-within:ring-component-node-widget-background-highlighted"
+    @pointerdown.stop
+    @pointermove.stop
+    @pointerup.stop
+  >
+    <FormDropdown
+      v-model:selected="selectedSet"
+      v-model:layout-mode="layoutMode"
+      :items="items"
+      :placeholder="placeholder"
+      :multiple="false"
+      :show-sort="false"
+      :show-layout-switcher="false"
+      :searcher="searcher"
+      class="min-w-0 flex-1"
+      @update:selected="handleSelection"
+    />
+    <button
+      v-if="remoteConfig?.refresh_button !== false"
+      type="button"
+      :aria-label="t('g.refresh')"
+      :title="t('g.refresh')"
+      class="text-secondary flex size-7 shrink-0 items-center justify-center rounded-sm hover:bg-component-node-widget-background-hovered"
+      @click.stop="handleRefresh"
+    >
+      <i
+        :class="
+          cn(
+            'icon-[lucide--refresh-cw] size-3.5',
+            (loading || loadingMore) && 'animate-spin'
+          )
+        "
+      />
+    </button>
+  </div>
+</template>

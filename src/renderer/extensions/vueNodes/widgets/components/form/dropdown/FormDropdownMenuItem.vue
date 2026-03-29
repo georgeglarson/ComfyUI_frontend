@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import { cn } from '@/utils/tailwindUtil'
 
 import { AssetKindKey } from './types'
 import type { LayoutMode } from './types'
+
+const { t } = useI18n()
 
 interface Props {
   index: number
@@ -12,6 +15,7 @@ interface Props {
   previewUrl: string
   name: string
   label?: string
+  description?: string
   layout?: LayoutMode
 }
 
@@ -27,9 +31,24 @@ const actualDimensions = ref<string | null>(null)
 const assetKind = inject(AssetKindKey)
 
 const isVideo = computed(() => assetKind?.value === 'video')
+const isAudio = computed(() => assetKind?.value === 'audio')
+
+const audioRef = ref<HTMLAudioElement | null>(null)
+const isPlayingAudio = ref(false)
 
 function handleClick() {
   emit('click', props.index)
+}
+
+function toggleAudioPreview(event: Event) {
+  event.stopPropagation()
+  const audio = audioRef.value
+  if (!audio) return
+  if (audio.paused) {
+    void audio.play().catch(() => {})
+  } else {
+    audio.pause()
+  }
 }
 
 function handleImageLoad(event: Event) {
@@ -107,6 +126,35 @@ function handleVideoLoad(event: Event) {
         muted
         @loadeddata="handleVideoLoad"
       />
+      <button
+        v-else-if="previewUrl && isAudio"
+        type="button"
+        :aria-label="
+          isPlayingAudio
+            ? t('widgets.remoteCombo.pauseAudioPreview')
+            : t('widgets.remoteCombo.playAudioPreview')
+        "
+        :aria-pressed="isPlayingAudio"
+        class="flex size-full cursor-pointer items-center justify-center bg-component-node-widget-background hover:bg-component-node-widget-background-hovered"
+        @click.stop="toggleAudioPreview"
+      >
+        <audio
+          ref="audioRef"
+          :src="previewUrl"
+          preload="none"
+          @play="isPlayingAudio = true"
+          @pause="isPlayingAudio = false"
+          @ended="isPlayingAudio = false"
+        />
+        <i
+          :class="
+            cn(
+              'text-secondary size-5',
+              isPlayingAudio ? 'icon-[lucide--pause]' : 'icon-[lucide--play]'
+            )
+          "
+        />
+      </button>
       <img
         v-else-if="previewUrl"
         :src="previewUrl"
@@ -143,6 +191,13 @@ function handleVideoLoad(event: Event) {
         "
       >
         {{ label ?? name }}
+      </span>
+      <!-- Description -->
+      <span
+        v-if="description && layout !== 'grid'"
+        class="text-secondary line-clamp-1 block overflow-hidden text-xs"
+      >
+        {{ description }}
       </span>
       <!-- Meta Data -->
       <span v-if="actualDimensions" class="text-secondary block text-xs">

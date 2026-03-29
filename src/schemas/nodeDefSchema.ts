@@ -5,6 +5,11 @@ import { resultItemType } from '@/schemas/apiSchema'
 import { CONTROL_OPTIONS } from '@/types/simplifiedWidget'
 
 const zComboOption = z.union([z.string(), z.number()])
+
+/**
+ * Plain remote combo config — feeds a standard combo dropdown from a remote endpoint.
+ * Handled by `useRemoteWidget` + `WidgetSelectDropdown`.
+ */
 const zRemoteWidgetConfig = z.object({
   route: z.string().url().or(z.string().startsWith('/')),
   refresh: z.number().gte(128).safe().or(z.number().lte(0).safe()).optional(),
@@ -15,6 +20,42 @@ const zRemoteWidgetConfig = z.object({
   timeout: z.number().gte(0).optional(),
   max_retries: z.number().gte(0).optional()
 })
+
+const zRemoteItemSchema = z.object({
+  value_field: z.string(),
+  label_field: z.string(),
+  preview_url_field: z.string().optional(),
+  preview_type: z.enum(['image', 'video', 'audio']).default('image'),
+  description_field: z.string().optional(),
+  search_fields: z.array(z.string()).optional()
+})
+
+/**
+ * Rich remote combo config — feeds `RichComboWidget` with item previews, search, filtering,
+ * and optional progressive pagination. Requires `item_schema`. Vue-nodes only.
+ */
+const zRemoteComboConfig = z
+  .object({
+    route: z.string().url().or(z.string().startsWith('/')),
+    item_schema: zRemoteItemSchema,
+    refresh_button: z.boolean().optional(),
+    auto_select: z.enum(['first', 'last']).optional(),
+    refresh: z.number().gte(128).safe().or(z.number().lte(0).safe()).optional(),
+    response_key: z.string().optional(),
+    timeout: z.number().gte(0).optional(),
+    max_retries: z.number().gte(0).optional(),
+    use_comfy_api: z.boolean().optional(),
+    page_size: z.number().gte(1).optional()
+  })
+  .superRefine((config, ctx) => {
+    if (config.use_comfy_api && !config.route.startsWith('/')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['route'],
+        message: 'route must be relative when use_comfy_api is true'
+      })
+    }
+  })
 const zMultiSelectOption = z.object({
   placeholder: z.string().optional(),
   chip: z.boolean().optional()
@@ -96,6 +137,7 @@ export const zComboInputOptions = zBaseInputOptions.extend({
   animated_image_upload: z.boolean().optional(),
   options: z.array(zComboOption).optional(),
   remote: zRemoteWidgetConfig.optional(),
+  remote_combo: zRemoteComboConfig.optional(),
   /** Whether the widget is a multi-select widget. */
   multi_select: zMultiSelectOption.optional()
 })
@@ -352,7 +394,9 @@ export const zMatchTypeOptions = z.object({
 export type ComfyInputsSpec = z.infer<typeof zComfyInputsSpec>
 export type ComfyOutputTypesSpec = z.infer<typeof zComfyOutputTypesSpec>
 export type ComfyNodeDef = z.infer<typeof zComfyNodeDef>
+export type RemoteItemSchema = z.infer<typeof zRemoteItemSchema>
 export type RemoteWidgetConfig = z.infer<typeof zRemoteWidgetConfig>
+export type RemoteComboConfig = z.infer<typeof zRemoteComboConfig>
 
 export type ComboInputOptions = z.infer<typeof zComboInputOptions>
 export type NumericInputOptions = z.infer<typeof zNumericInputOptions>

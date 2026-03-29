@@ -71,4 +71,67 @@ describe('validateNodeDef', () => {
       })
     }
   )
+
+  describe('remote_combo cross-field validation', () => {
+    const buildNodeDef = (remoteCombo: object): unknown => ({
+      ...EXAMPLE_NODE_DEF,
+      input: {
+        required: {
+          voice: ['COMBO', { remote_combo: remoteCombo }]
+        }
+      }
+    })
+
+    const baseRemoteCombo = {
+      item_schema: { value_field: 'id', label_field: 'name' }
+    }
+
+    it('rejects use_comfy_api=true paired with an absolute route', () => {
+      expect(
+        validateComfyNodeDef(
+          buildNodeDef({
+            ...baseRemoteCombo,
+            route: 'https://api.example.com/voices',
+            use_comfy_api: true
+          }),
+          () => {}
+        )
+      ).toBeNull()
+    })
+
+    it('accepts use_comfy_api=true paired with a relative route', () => {
+      expect(
+        validateComfyNodeDef(
+          buildNodeDef({
+            ...baseRemoteCombo,
+            route: '/voices',
+            use_comfy_api: true
+          })
+        )
+      ).not.toBeNull()
+    })
+
+    it('accepts use_comfy_api=false with an absolute route', () => {
+      expect(
+        validateComfyNodeDef(
+          buildNodeDef({
+            ...baseRemoteCombo,
+            route: 'https://api.example.com/voices',
+            use_comfy_api: false
+          })
+        )
+      ).not.toBeNull()
+    })
+
+    it('accepts an absolute route when use_comfy_api is omitted', () => {
+      expect(
+        validateComfyNodeDef(
+          buildNodeDef({
+            ...baseRemoteCombo,
+            route: 'https://api.example.com/voices'
+          })
+        )
+      ).not.toBeNull()
+    })
+  })
 })
