@@ -415,8 +415,14 @@ function handleRefresh() {
   abortController?.abort()
   error.value = null
   const config = remoteConfig.value
-  if (config) void clearCache(config)
-  void fetchItems(true)
+  // Sequence the cache delete before the refetch: otherwise the (very fast)
+  // setCache from a quickly-resolved network response can land the new entry
+  // before the still-pending cache.delete removes it, silently dropping the
+  // freshly-cached data on the next mount.
+  void (async () => {
+    if (config) await clearCache(config)
+    await fetchItems(true)
+  })()
 }
 
 function handleSelection(selected: Set<string>) {
