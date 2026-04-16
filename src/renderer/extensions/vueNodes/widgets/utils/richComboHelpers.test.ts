@@ -48,28 +48,38 @@ describe('buildCacheKey', () => {
     ).toBe('1')
   })
 
-  it('partitions by userId only when use_comfy_api is true', () => {
+  it('partitions by authScope only when use_comfy_api is true', () => {
     const comfyA = buildCacheKey(
       { ...baseConfig, use_comfy_api: true },
-      'user-a'
+      'ws:team-a'
     )
     const comfyB = buildCacheKey(
       { ...baseConfig, use_comfy_api: true },
-      'user-b'
+      'ws:team-b'
     )
     expect(comfyA).not.toBe(comfyB)
-    expect(parseKey(comfyA).get('u')).toBe('user-a')
-    expect(parseKey(comfyB).get('u')).toBe('user-b')
+    expect(parseKey(comfyA).get('u')).toBe('ws:team-a')
+    expect(parseKey(comfyB).get('u')).toBe('ws:team-b')
   })
 
-  it('shares the cache across users when use_comfy_api is false', () => {
-    const a = buildCacheKey(baseConfig, 'user-a')
-    const b = buildCacheKey(baseConfig, 'user-b')
+  it('shares the cache across auth scopes when use_comfy_api is false', () => {
+    const a = buildCacheKey(baseConfig, 'fb:user-a')
+    const b = buildCacheKey(baseConfig, 'fb:user-b')
     expect(a).toBe(b)
     expect(parseKey(a).has('u')).toBe(false)
   })
 
-  it('falls back to "anon" when use_comfy_api is true and userId is missing', () => {
+  it('treats workspace, firebase, and api-key scopes as distinct buckets', () => {
+    const ws = buildCacheKey({ ...baseConfig, use_comfy_api: true }, 'ws:abc')
+    const fb = buildCacheKey({ ...baseConfig, use_comfy_api: true }, 'fb:abc')
+    const apikey = buildCacheKey(
+      { ...baseConfig, use_comfy_api: true },
+      'apikey'
+    )
+    expect(new Set([ws, fb, apikey]).size).toBe(3)
+  })
+
+  it('falls back to "anon" when use_comfy_api is true and authScope is missing', () => {
     expect(
       parseKey(buildCacheKey({ ...baseConfig, use_comfy_api: true }, null)).get(
         'u'

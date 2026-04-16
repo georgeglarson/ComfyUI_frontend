@@ -2,11 +2,14 @@
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
+import { useFeatureFlags } from '@/composables/useFeatureFlags'
+import { useWorkspaceAuthStore } from '@/platform/workspace/stores/workspaceAuthStore'
 import { isComboInputSpec } from '@/schemas/nodeDef/nodeDefSchemaV2'
 import type {
   RemoteComboConfig,
   RemoteItemSchema
 } from '@/schemas/nodeDefSchema'
+import { useApiKeyAuthStore } from '@/stores/apiKeyAuthStore'
 import { useAuthStore } from '@/stores/authStore'
 import type { SimplifiedWidget } from '@/types/simplifiedWidget'
 import { cn } from '@/utils/tailwindUtil'
@@ -35,11 +38,31 @@ const DEFAULT_TIMEOUT = 30000
 // --- Persistent cache using browser Cache API (survives page reloads) ---
 const CACHE_NAME = 'comfy-remote-widget'
 
+// Mirrors useAuthStore().getAuthHeader()'s priority chain so the cache is
+// partitioned by the *active* auth context, not just the firebase user.
+// Same firebase user across two workspaces, or across workspace ↔ personal,
+// would otherwise share a cache and bleed data.
+//
+// Returns an opaque, non-secret identifier. The API-key branch deliberately
+// returns a constant rather than the key value or a hash of it: hashing is
+// async (SubtleCrypto), and grouping all keys on one machine under a single
+// scope is an acceptable tradeoff for the rare key-rotation case.
+function getAuthScope(): string {
+  const { flags } = useFeatureFlags()
+  if (flags.teamWorkspacesEnabled) {
+    const wsId = useWorkspaceAuthStore().currentWorkspace?.id
+    if (wsId) return `ws:${wsId}`
+  }
+  const uid = useAuthStore().userId
+  if (uid) return `fb:${uid}`
+  return useApiKeyAuthStore().getApiKey() ? 'apikey' : 'anon'
+}
+
 function cacheKeyFor(config: RemoteComboConfig): string {
-  // Mirror the original lazy lookup: only touch the auth store when the
-  // userId actually contributes to the key (use_comfy_api routes).
-  const userId = config.use_comfy_api ? useAuthStore().userId : undefined
-  return buildCacheKey(config, userId)
+  // Mirror the original lazy lookup: only resolve the auth scope when it
+  // actually contributes to the key (use_comfy_api routes).
+  const authScope = config.use_comfy_api ? getAuthScope() : undefined
+  return buildCacheKey(config, authScope)
 }
 
 async function getCached(config: RemoteComboConfig): Promise<unknown[] | null> {

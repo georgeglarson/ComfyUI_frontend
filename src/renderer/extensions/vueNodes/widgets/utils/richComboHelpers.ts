@@ -9,13 +9,14 @@ const BACKOFF_CAP_MS = 16000
  * Build a stable cache key for a remote combo configuration.
  *
  * Non-comfy-api routes intentionally share cache across users on the same
- * machine; comfy-api routes are partitioned per user via `userId`. Pass the
- * caller's resolved userId (or null/undefined) — keeping the dependency on
- * the auth store outside this helper makes it pure and trivially testable.
+ * machine; comfy-api routes are partitioned by `authScope` — an opaque,
+ * non-secret identifier of the active auth context (workspace id, firebase
+ * uid, etc.). Resolving the scope is the caller's responsibility, which
+ * keeps this helper pure and trivially testable.
  */
 export function buildCacheKey(
   config: RemoteComboConfig,
-  userId?: string | null
+  authScope?: string | null
 ): string {
   const params = new URLSearchParams({
     route: config.route,
@@ -24,7 +25,7 @@ export function buildCacheKey(
     pageSize: String(config.page_size ?? 0)
   })
   if (config.use_comfy_api) {
-    params.set('u', userId ?? 'anon')
+    params.set('u', authScope ?? 'anon')
   }
   return `https://cache.comfy.invalid/?${params}`
 }
