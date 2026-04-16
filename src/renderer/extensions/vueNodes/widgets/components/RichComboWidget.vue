@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import axios from 'axios'
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -22,6 +21,11 @@ import {
   mapToDropdownItem
 } from '../utils/itemSchemaUtils'
 import { fetchRemoteRoute } from '../utils/fetchRemoteRoute'
+import {
+  buildCacheKey,
+  getBackoff,
+  isRetriableError
+} from '../utils/richComboHelpers'
 
 const DEFAULT_MAX_RETRIES = 5
 const DEFAULT_TIMEOUT = 30000
@@ -29,23 +33,17 @@ const DEFAULT_TIMEOUT = 30000
 // --- Persistent cache using browser Cache API (survives page reloads) ---
 const CACHE_NAME = 'comfy-remote-widget'
 
-function buildCacheKey(config: RemoteComboConfig): string {
-  const params = new URLSearchParams({
-    route: config.route,
-    useComfyApi: config.use_comfy_api ? '1' : '0',
-    responseKey: config.response_key ?? '',
-    pageSize: String(config.page_size ?? 0)
-  })
-  if (config.use_comfy_api) {
-    params.set('u', useAuthStore().userId ?? 'anon')
-  }
-  return `https://cache.comfy.invalid/?${params}`
+function cacheKeyFor(config: RemoteComboConfig): string {
+  // Mirror the original lazy lookup: only touch the auth store when the
+  // userId actually contributes to the key (use_comfy_api routes).
+  const userId = config.use_comfy_api ? useAuthStore().userId : undefined
+  return buildCacheKey(config, userId)
 }
 
 async function getCached(config: RemoteComboConfig): Promise<unknown[] | null> {
   try {
     const cache = await caches.open(CACHE_NAME)
-    const resp = await cache.match(buildCacheKey(config))
+    const resp = await cache.match(cacheKeyFor(config))
     if (!resp) return null
     const entry = await resp.json()
     const ttl = config.refresh
@@ -60,7 +58,7 @@ async function getCached(config: RemoteComboConfig): Promise<unknown[] | null> {
 async function clearCache(config: RemoteComboConfig) {
   try {
     const cache = await caches.open(CACHE_NAME)
-    await cache.delete(buildCacheKey(config))
+    await cache.delete(cacheKeyFor(config))
   } catch {
     // ignore
   }
@@ -70,7 +68,7 @@ async function setCache(config: RemoteComboConfig, data: unknown[]) {
   try {
     const cache = await caches.open(CACHE_NAME)
     const body = JSON.stringify({ data, timestamp: Date.now() })
-    await cache.put(buildCacheKey(config), new Response(body))
+    await cache.put(cacheKeyFor(config), new Response(body))
   } catch {
     // Cache API unavailable — widget still works, just no persistence
   }
@@ -103,20 +101,6 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const error = ref<string | null>(null)
 let abortController: AbortController | undefined
-
-function getBackoff(count: number): number {
-  return Math.min(1000 * Math.pow(2, count), 16000)
-}
-
-// Distinguish transient errors (worth retrying) from permanent ones.
-// 401/403/404 etc. won't fix themselves — retrying wastes time.
-function isRetriableError(err: unknown): boolean {
-  if (!axios.isAxiosError(err)) return true
-  const status = err.response?.status
-  if (status == null) return true
-  if (status >= 500) return true
-  return status === 408 || status === 429
-}
 
 // --- Auto-select policy ---
 // Only sets modelValue when it's empty; never overrides an existing value
