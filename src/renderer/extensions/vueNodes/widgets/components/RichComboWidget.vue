@@ -24,7 +24,9 @@ import { fetchRemoteRoute } from '../utils/fetchRemoteRoute'
 import {
   buildCacheKey,
   getBackoff,
-  isRetriableError
+  isRetriableError,
+  summarizeError,
+  summarizePayload
 } from '../utils/richComboHelpers'
 
 const DEFAULT_MAX_RETRIES = 5
@@ -142,7 +144,7 @@ async function fetchAll(config: RemoteComboConfig) {
         console.error('RichComboWidget: expected array response', {
           route: config.route,
           responseKey: config.response_key,
-          received: res.data
+          received: summarizePayload(res.data)
         })
         error.value = t('widgets.remoteCombo.loadFailed')
         break
@@ -154,7 +156,10 @@ async function fetchAll(config: RemoteComboConfig) {
       break
     } catch (err: unknown) {
       if (controller.signal.aborted) return
-      console.error('RichComboWidget: fetch error', err)
+      console.error('RichComboWidget: fetch error', {
+        route: config.route,
+        error: summarizeError(err)
+      })
       if (!isRetriableError(err)) {
         error.value = t('widgets.remoteCombo.loadFailed')
         break
@@ -209,7 +214,11 @@ async function fetchPaginated(config: RemoteComboConfig) {
       ) {
         console.error(
           'RichComboWidget: expected { items, has_more } response',
-          { route: config.route, page, received: res.data }
+          {
+            route: config.route,
+            page,
+            received: summarizePayload(res.data)
+          }
         )
         break
       }
@@ -240,17 +249,17 @@ async function fetchPaginated(config: RemoteComboConfig) {
       if (controller.signal.aborted) return
 
       if (!isRetriableError(err)) {
-        console.error(
-          `RichComboWidget: non-retriable error on page ${page}`,
-          err
-        )
+        console.error(`RichComboWidget: non-retriable error on page ${page}`, {
+          route: config.route,
+          error: summarizeError(err)
+        })
         break
       }
       consecutiveErrors++
       if (consecutiveErrors >= maxRetries) {
         console.error(
           `RichComboWidget: giving up after ${maxRetries} consecutive errors on page ${page}`,
-          err
+          { route: config.route, error: summarizeError(err) }
         )
         break
       }
