@@ -13,6 +13,7 @@ import { RecordingManager } from './RecordingManager'
 import { SceneManager } from './SceneManager'
 import { SceneModelManager } from './SceneModelManager'
 import { ViewHelperManager } from './ViewHelperManager'
+import { computeCameraFromMatrices } from './cameraFromMatrices'
 import type {
   CameraState,
   CaptureResult,
@@ -523,6 +524,24 @@ class Load3d {
   setFOV(fov: number): void {
     this.cameraManager.setFOV(fov)
     this.forceRender()
+  }
+
+  setCameraFromMatrices(
+    extrinsics: readonly (readonly number[])[],
+    intrinsics: readonly (readonly number[])[]
+  ): void {
+    const { position, target, fovYDegrees } = computeCameraFromMatrices(
+      extrinsics,
+      intrinsics
+    )
+    const current = this.cameraManager.getCameraState()
+    this.setCameraState({
+      position: new THREE.Vector3(position[0], position[1], position[2]),
+      target: new THREE.Vector3(target[0], target[1], target[2]),
+      zoom: current.zoom,
+      cameraType: current.cameraType
+    })
+    this.setFOV(fovYDegrees)
   }
 
   setMaterialMode(mode: MaterialMode): void {
