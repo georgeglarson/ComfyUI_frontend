@@ -1,0 +1,25 @@
+src/platform/keybindings/keybindingService.escape.test.ts
+  0fb5723d951fbb7e 13-14,50-61,77-79,84-88,114-116,121-129,133
+src/platform/keybindings/keybindingService.ts
+  0fb5723d951fbb7e 5,17,58-62,64-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "14ef84bfe14b197858c14f1f239fecaedd6f7853",
+  "prompts": {
+    "0fb5723d951fbb7e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b62e870-2090-494e-a706-cee366d838e1",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "george larson",
+      "messages": [],
+      "total_additions": 56,
+      "total_deletions": 52,
+      "accepted_lines": 45,
+      "overriden_lines": 0
+    }
+  }
+}
